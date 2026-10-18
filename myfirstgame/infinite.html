@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>江湖行 - 无限闯关</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:#171b22;color:#f5f1e8;font-family:Arial,"Microsoft YaHei",sans-serif}
+.app{max-width:1000px;margin:auto}
+h1{margin:0 0 8px}
+.info{color:#c0c9d4;font-size:14px;line-height:1.7}
+canvas{display:block;width:100%;height:auto;border:3px solid #d6c39f;image-rendering:pixelated;background:#a5d0dc}
+.hud,.buttons{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.pill,.panel{background:#252e39;border:1px solid #46515f;border-radius:8px;padding:10px 12px}
+.bar{display:inline-block;width:100px;height:10px;background:#572c32;border-radius:8px;overflow:hidden;vertical-align:middle;margin-left:5px}
+.fill{display:block;height:100%;background:#e85b5b;width:100%}
+button{border:0;border-radius:7px;padding:10px 15px;font-weight:bold;background:#e4b76b;color:#241b10;cursor:pointer}
+button:disabled{opacity:.4;cursor:not-allowed}
+.secondary{background:#48586b;color:white}
+.status{min-height:25px;color:#f3ce87;font-weight:bold;margin:8px 0}
+.panel{margin-top:10px}
+.panel h3{margin:0 0 10px}
+.items{display:flex;flex-wrap:wrap;gap:8px}
+.item{background:#354252;border-radius:6px;padding:8px 10px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="app">
+<h1>⚔️ 江湖行 · 无限闯关</h1>
+<p class="info">
+每关会同时出现多名敌人。清除所有敌人后，手动点击「下一关」继续挑战。
+关卡越高，敌人越多、属性越强。每 5 关出现一名首领。
+</p>
+
+<canvas id="game" width="960" height="500"></canvas>
+
+<div class="hud">
+<span class="pill">关卡：<b id="stage">1</b></span>
+<span class="pill">剩余敌人：<b id="remaining">0</b></span>
+<span class="pill">生命：<b id="hpText">100/100</b><span class="bar"><i class="fill" id="hpFill"></i></span></span>
+<span class="pill">金币：<b id="gold">0</b></span>
+<span class="pill">攻击力：<b id="atk">15</b></span>
+</div>
+
+<div class="buttons">
+<button id="next" disabled>下一关 ▶</button>
+<button id="heal" class="secondary">使用药品</button>
+<button id="restart" class="secondary">重新开始</button>
+</div>
+
+<div id="status" class="status">第 1 关开始！击败所有敌人。</div>
+
+<div class="panel">
+<h3>🎒 装备与背包</h3>
+<div id="inventory" class="items"></div>
+<p class="info">击败敌人可获得金币，并有概率掉落药品和更强的武器。武器获得后会自动装备。每 5 关出现首领。</p>
+</div>
+
+<div class="panel">
+<h3>操作说明</h3>
+<p class="info">
+A / D 或 ← / →：移动<br>
+空格 / W / ↑：跳跃<br>
+J：近战攻击<br>
+K：发射剑气<br>
+Shift：闪避<br>
+通关后必须手动点击「下一关」，不会自动进入下一关。
+</p>
+</div>
+</div>
+
+<script>
+(()=>{
+"use strict";
+
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+const $=id=>document.getElementById(id);
+const W=canvas.width;
+const H=canvas.height;
+const FLOOR=410;
+
+const weapons=[
+ {name:"木剑",atk:0,lv:1},
+ {name:"铁剑",atk:5,lv:2},
+ {name:"精钢剑",atk:10,lv:3},
+ {name:"玄铁重剑",atk:18,lv:4},
+ {name:"龙吟剑",atk:30,lv:5},
+ {name:"天外飞仙",atk:48,lv:6},
+ {name:"斩龙神剑",atk:70,lv:7},
+ {name:"九州仙剑",atk:100,lv:8}
+];
+
+let stage=1;
+let gold=0;
+let potions=3;
+let weapon=weapons[0];
+let player;
+let enemies=[];
+let projectiles=[];
+let particles=[];
+let keys={};
+let state="playing";
+let attackCD=0;
+let shotCD=0;
+let dodgeCD=0;
+let invuln=0;
+let lastTime=0;
+
+function createPlayer(){
+ player={
+  x:100,y:FLOOR-56,w:34,h:56,
+  vx:0,vy:0,
+  hp:100,maxHp:100,
+  face:1,onGround:true,
+  baseAtk:15
+ };
+}
+
+function getEnemyCount(){
+ // 敌人数量逐关增加，最高每关 25 个普通敌人
+ return Math.min(4+Math.floor((stage-1)*1.5),25);
+}
+
+function createEnemy(index,isBoss=false){
+ const scale=1+(stage-1)*0.16;
+ const type=isBoss?"boss":
+  ["swordsman","runner","archer"][Math.floor(Math.random()*3)];
+
+ let stats;
+
+ if(isBoss){
+  stats={
+   hp:220*scale,
+   atk:18+stage*2,
+   w:58,h:78,
+   speed:1+Math.min(stage*.025,.8)
+  };
+ }else if(type==="runner"){
+  stats={
+   hp:34*scale,
+   atk:5+Math.floor(stage*.8),
+   w:27,h:44,
+   speed:1.65+Math.min(stage*.04,1.2)
+  };
+ }else if(type==="archer"){
+  stats={
+   hp:42*scale,
+   atk:6+Math.floor(stage*.8),
+   w:32,h:53,
+   speed:.55+Math.min(stage*.02,.5)
+  };
+ }else{
+  stats={
+   hp:52*scale,
+   atk:7+Math.floor(stage*.9),
+   w:34,h:55,
+   speed:.9+Math.min(stage*.035,1)
+  };
+ }
+
+ return{
+  x:470+index*92,
+  y:FLOOR-stats.h,
+  w:stats.w,h:stats.h,
+  hp:stats.hp,maxHp:stats.hp,
+  atk:stats.atk,
+  speed:stats.speed,
+  type,
+  boss:isBoss,
+  alive:true,
+  face:-1,
+  cooldown:.6+Math.random(),
+  flash:0
+ };
+}
+
+function startStage(){
+ state="playing";
+ $("next").disabled=true;
+ projectiles=[];
+ particles=[];
+ enemies=[];
+
+ createPlayer();
+
+ const count=getEnemyCount();
+
+ // 一次性创建本关全部普通敌人，不是打完一个才刷新一个
+ for(let i=0;i<count;i++){
+  enemies.push(createEnemy(i,false));
+ }
+
+ // 每五关额外加入一名首领
+ if(stage%5===0){
+  enemies.push(createEnemy(count,true));
+ }
+
+ $("status").textContent=
+  `第 ${stage} 关：${enemies.length} 名敌人同时出现，清除全部敌人！`;
+
+ updateHUD();
+}
+
+function getAttack(){
+ return player.baseAtk+weapon.atk;
+}
+
+function updateHUD(){
+ $("stage").textContent=stage;
+ $("remaining").textContent=enemies.filter(e=>e.alive).length;
+ $("hpText").textContent=
+  `${Math.ceil(player.hp)}/${player.maxHp}`;
+ $("hpFill").style.width=
+  Math.max(0,player.hp/player.maxHp*100)+"%";
+ $("gold").textContent=gold;
+ $("atk").textContent=getAttack();
+
+ $("inventory").innerHTML=
+  `<span class="item">已装备：${weapon.name}（攻击 +${weapon.atk}）</span>
+   <span class="item">药品 × ${potions}</span>
+   <span class="item">金币：${gold}</span>`;
+}
+
+function createParticles(x,y,color="#f3d18a"){
+ for(let i=0;i<6;i++){
+  particles.push({
+   x,y,
+   vx:(Math.random()-.5)*3.5,
+   vy:-Math.random()*3,
+   life:.35,
+   color
+  });
+ }
+}
+
+function checkStageClear(){
+ if(state!=="playing")return;
+
+ // 只有全部普通敌人和首领都被击败，才能通关
+ if(enemies.every(e=>!e.alive)){
+  state="clear";
+  $("next").disabled=false;
+  $("status").textContent=
+   `第 ${stage} 关已通关！点击「下一关」进入第 ${stage+1} 关。`;
+ }
+}
+
+function damageEnemy(enemy,damage){
+ if(!enemy.alive||state!=="playing")return;
+
+ enemy.hp-=damage;
+ enemy.flash=.12;
+
+ createParticles(
+  enemy.x+enemy.w/2,
+  enemy.y+enemy.h/2
+ );
+
+ if(enemy.hp<=0){
+  enemy.alive=false;
+
+  gold+=enemy.boss?100:5+Math.floor(Math.random()*9);
+
+  if(Math.random()<.24){
+   potions++;
+  }
+
+  if(Math.random()<.25){
+   const available=weapons.filter(w=>
+    w.lv>weapon.lv &&
+    w.lv<=Math.min(
+     weapons.length,
+     Math.floor(stage/2)+2
+    )
+   );
+
+   if(available.length){
+    const drop=available[
+     Math.floor(Math.random()*available.length)
+    ];
+
+    if(drop.atk>weapon.atk){
+     weapon=drop;
+     $("status").textContent=
+      `获得新武器：${drop.name}，已自动装备！`;
+    }
+   }
+  }
+
+  if(enemy.boss){
+   $("status").textContent=
+    "首领已被击败！继续清理剩余敌人。";
+  }
+
+  checkStageClear();
+ }
+
+ updateHUD();
+}
+
+function damagePlayer(damage){
+ if(state!=="playing"||invuln>0)return;
+
+ player.hp-=damage;
+ invuln=.55;
+
+ createParticles(
+  player.x+player.w/2,
+  player.y+20,
+  "#ff7777"
+ );
+
+ if(player.hp<=0){
+  player.hp=0;
+  state="dead";
+  $("next").disabled=true;
+  $("status").textContent=
+   "你被击败了！点击「重新开始」再战。";
+ }
+
+ updateHUD();
+}
+
+function meleeAttack(){
+ if(state!=="playing"||attackCD>0)return;
+
+ attackCD=.36;
+
+ for(const enemy of enemies){
+  if(!enemy.alive)continue;
+
+  const dx=
+   enemy.x+enemy.w/2-
+   (player.x+player.w/2);
+
+  const dy=Math.abs(
+   enemy.y+enemy.h/2-
+   (player.y+player.h/2)
+  );
+
+  if(
+   Math.abs(dx)<83 &&
+   dy<67 &&
+   Math.sign(dx||player.face)===player.face
+  ){
+   damageEnemy(enemy,getAttack());
+  }
+ }
+
+ createParticles(
+  player.x+player.w/2+player.face*38,
+  player.y+24
+ );
+}
+
+function shootSwordQi(){
+ if(state!=="playing"||shotCD>0)return;
+
+ shotCD=.55;
+
+ projectiles.push({
+  x:player.x+player.w/2+player.face*18,
+  y:player.y+25,
+  vx:player.face*8,
+  life:1.5,
+  damage:Math.round(getAttack()*.9),
+  from:"player"
+ });
+}
+
+function update(dt){
+ if(state!=="playing")return;
+
+ attackCD=Math.max(0,attackCD-dt);
+ shotCD=Math.max(0,shotCD-dt);
+ dodgeCD=Math.max(0,dodgeCD-dt);
+ invuln=Math.max(0,invuln-dt);
+
+ player.vx=0;
+
+ if(keys.a||keys.arrowleft){
+  player.vx=-3.5;
+  player.face=-1;
+ }
+
+ if(keys.d||keys.arrowright){
+  player.vx=3.5;
+  player.face=1;
+ }
+
+ if(
+  (keys[" "]||keys.w||keys.arrowup) &&
+  player.onGround
+ ){
+  player.vy=-10.5;
+  player.onGround=false;
+ }
+
+ if(keys.shift&&dodgeCD<=0){
+  player.vx=player.face*9;
+  dodgeCD=.8;
+  invuln=Math.max(invuln,.25);
+ }
+
+ player.x=Math.max(
+  0,
+  Math.min(W-player.w,player.x+player.vx)
+ );
+
+ player.vy+=.48;
+ player.y+=player.vy;
+
+ if(player.y+player.h>=FLOOR){
+  player.y=FLOOR-player.h;
+  player.vy=0;
+  player.onGround=true;
+ }
+
+ // 所有存活敌人都独立行动
+ for(const enemy of enemies){
+  if(!enemy.alive)continue;
+
+  enemy.flash=Math.max(0,enemy.flash-dt);
+  enemy.cooldown-=dt;
+
+  const dx=
+   player.x+player.w/2-
+   (enemy.x+enemy.w/2);
+
+  enemy.face=dx>=0?1:-1;
+
+  // 弓箭手保持距离并向玩家射箭
+  if(enemy.type==="archer"&&!enemy.boss){
+   if(Math.abs(dx)>205){
+    enemy.x+=Math.sign(dx)*enemy.speed*.55;
+   }
+
+   if(enemy.cooldown<=0&&Math.abs(dx)<450){
+    projectiles.push({
+     x:enemy.x+enemy.w/2,
+     y:enemy.y+23,
+     vx:enemy.face*4.2,
+     life:2,
+     damage:enemy.atk,
+     from:"enemy"
+    });
+
+    enemy.cooldown=Math.max(.8,1.8-stage*.025);
+   }
+  }else{
+   // 近战敌人和首领会追击玩家
+   if(Math.abs(dx)>42){
+    enemy.x+=Math.sign(dx)*enemy.speed;
+   }
+
+   if(
+    Math.abs(dx)<enemy.w/2+player.w/2+9 &&
+    Math.abs(
+     enemy.y+enemy.h/2-
+     (player.y+player.h/2)
+    )<58 &&
+    enemy.cooldown<=0
+   ){
+    damagePlayer(enemy.atk);
+    enemy.cooldown=enemy.boss?.85:1.1;
+   }
+  }
+
+  enemy.x=Math.max(
+   4,
+   Math.min(W-enemy.w-4,enemy.x)
+  );
+ }
+
+ // 处理剑气与敌方箭矢
+ for(const p of projectiles){
+  p.x+=p.vx;
+  p.life-=dt;
+
+  if(p.from==="player"){
+   for(const enemy of enemies){
+    if(
+     enemy.alive &&
+     p.x>=enemy.x &&
+     p.x<=enemy.x+enemy.w &&
+     p.y>=enemy.y &&
+     p.y<=enemy.y+enemy.h
+    ){
+     damageEnemy(enemy,p.damage);
+     p.life=0;
+     break;
+    }
+   }
+  }else{
+   if(
+    p.x>=player.x &&
+    p.x<=player.x+player.w &&
+    p.y>=player.y &&
+    p.y<=player.y+player.h
+   ){
+    damagePlayer(p.damage);
+    p.life=0;
+   }
+  }
+ }
+
+ projectiles=projectiles.filter(
+  p=>p.life>0&&p.x>-20&&p.x<W+20
+ );
+
+ for(const p of particles){
+  p.x+=p.vx;
+  p.y+=p.vy;
+  p.vy+=.1;
+  p.life-=dt;
+ }
+
+ particles=particles.filter(p=>p.life>0);
+
+ updateHUD();
+}
+
+function rect(x,y,w,h,color){
+ ctx.fillStyle=color;
+ ctx.fillRect(Math.round(x),Math.round(y),w,h);
+}
+
+function draw(){
+ ctx.clearRect(0,0,W,H);
+
+ rect(0,0,W,H,"#9fcbd7");
+ rect(0,300,W,110,"#8da978");
+
+ ctx.fillStyle="#70966f";
+ ctx.beginPath();
+ ctx.moveTo(0,340);
+
+ for(let x=0;x<=W;x+=70){
+  ctx.lineTo(x,280+Math.sin(x*.017)*24);
+ }
+
+ ctx.lineTo(W,410);
+ ctx.lineTo(0,410);
+ ctx.closePath();
+ ctx.fill();
+
+ rect(0,FLOOR,W,H-FLOOR,"#57483a");
+
+ for(let x=0;x<W;x+=32){
+  rect(x,FLOOR,2,90,"#6c5944");
+  rect(x+9,FLOOR+22,13,3,"#746047");
+ }
+
+ // 树木
+ for(let x=35;x<W;x+=170){
+  rect(x+23,265,9,145,"#694c35");
+  rect(x,270,58,7,"#3f684d");
+  rect(x+7,250,45,8,"#3f684d");
+  rect(x+15,230,29,8,"#3f684d");
+ }
+
+ // 玩家
+ if(!(invuln>0&&Math.floor(performance.now()/70)%2===0)){
+  rect(player.x+8,player.y+18,18,24,"#315c91");
+  rect(player.x+9,player.y+3,16,17,"#efc69b");
+  rect(player.x+7,player.y,20,7,"#25232a");
+  rect(player.x+10,player.y+42,6,14,"#272d39");
+  rect(player.x+21,player.y+42,6,14,"#272d39");
+  rect(
+   player.x+(player.face>0?31:-7),
+   player.y+20,24,3,"#e8e6d9"
+  );
+ }
+
+ // 所有敌人
+ for(const enemy of enemies){
+  if(!enemy.alive)continue;
+
+  let color;
+
+  if(enemy.flash>0)color="#ffffff";
+  else if(enemy.boss)color="#642d78";
+  else if(enemy.type==="runner")color="#b85c3c";
+  else if(enemy.type==="archer")color="#487b52";
+  else color="#873e42";
+
+  rect(
+   enemy.x+5,enemy.y+18,
+   enemy.w-10,enemy.h-18,color
+  );
+
+  rect(
+   enemy.x+6,enemy.y,
+   enemy.w-12,20,
+   enemy.boss?"#d9b5e6":"#d9b18a"
+  );
+
+  rect(enemy.x+8,enemy.y+5,4,4,"#26232a");
+  rect(enemy.x+enemy.w-12,enemy.y+5,4,4,"#26232a");
+
+  if(enemy.boss){
+   ctx.fillStyle="#171b22";
+   ctx.font="bold 14px Arial";
+   ctx.fillText("首领",enemy.x+5,enemy.y-9);
+  }
+
+  // 敌人血条
+  rect(enemy.x,enemy.y-10,enemy.w,5,"#4a2929");
+  rect(
+   enemy.x,enemy.y-10,
+   enemy.w*Math.max(0,enemy.hp/enemy.maxHp),
+   5,"#d95050"
+  );
+ }
+
+ // 投射物
+ for(const p of projectiles){
+  rect(
+   p.x,p.y,
+   p.from==="player"?18:12,4,
+   p.from==="player"?"#fff2a6":"#ff7a43"
+  );
+ }
+
+ for(const p of particles){
+  rect(p.x,p.y,4,4,p.color);
+ }
+
+ ctx.fillStyle="#1c2730";
+ ctx.font="bold 15px Arial";
+ ctx.fillText(`第 ${stage} 关`,18,25);
+
+ if(state==="clear"||state==="dead"){
+  rect(0,0,W,H,"#111a22aa");
+
+  ctx.textAlign="center";
+  ctx.fillStyle="#ffffff";
+  ctx.font="bold 34px Arial";
+
+  ctx.fillText(
+   state==="clear"?"本关已通关！":"挑战失败",
+   W/2,H/2-10
+  );
+
+  ctx.font="18px Arial";
+
+  ctx.fillText(
+   state==="clear"
+    ?"点击下方「下一关」继续"
+    :"点击「重新开始」再次挑战",
+   W/2,H/2+28
+  );
+
+  ctx.textAlign="left";
+ }
+}
+
+function gameLoop(time){
+ const dt=Math.min((time-lastTime)/1000||0,.033);
+ lastTime=time;
+
+ update(dt);
+ draw();
+
+ requestAnimationFrame(gameLoop);
+}
+
+window.addEventListener("keydown",event=>{
+ const key=event.key.toLowerCase();
+
+ if([
+  " ","arrowup","arrowdown",
+  "arrowleft","arrowright","shift"
+ ].includes(key)){
+  event.preventDefault();
+ }
+
+ keys[key]=true;
+
+ if(key==="j")meleeAttack();
+ if(key==="k")shootSwordQi();
+});
+
+window.addEventListener("keyup",event=>{
+ keys[event.key.toLowerCase()]=false;
+});
+
+// 必须手动点击才能开始下一关
+$("next").addEventListener("click",()=>{
+ if(state==="clear"){
+  stage++;
+  startStage();
+ }
+});
+
+$("heal").addEventListener("click",()=>{
+ if(potions>0&&player.hp>0&&player.hp<player.maxHp){
+  potions--;
+  player.hp=Math.min(player.maxHp,player.hp+30);
+  updateHUD();
+  $("status").textContent="使用药品，恢复了 30 点生命（不超过生命上限）。";
+ }else if(potions<=0){
+  $("status").textContent="药品不足！击败敌人有机会获得药品。";
+ }else{
+  $("status").textContent="当前生命值已满，不需要使用药品。";
+ }
+});
+
+$("restart").addEventListener("click",()=>{
+ stage=1;
+ gold=0;
+ potions=3;
+ weapon=weapons[0];
+ startStage();
+});
+
+startStage();
+requestAnimationFrame(gameLoop);
+
+})();
+</script>
+</body>
+</html>
